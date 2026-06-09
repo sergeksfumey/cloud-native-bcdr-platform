@@ -230,7 +230,7 @@ Primary differentiator: continuous DR validation -- automated test failover pipe
 ---
 
 ## Repository Structure
-
+```
 cloud-native-bcdr-platform/
 ├── terraform/
 │   ├── modules/
@@ -254,7 +254,7 @@ cloud-native-bcdr-platform/
     ├── architecture.md
     ├── recovery-plan.md
     └── dr-test-runbook.md
-
+```
 ---
 
 ## Future Evolution
