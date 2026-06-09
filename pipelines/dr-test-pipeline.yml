@@ -1,0 +1,148 @@
+# =============================================================================
+# DR Test Pipeline -- Monthly Automated Execution
+# Schedule: 2 AM on 1st of each month
+# Test failover executes in ISOLATED network -- no production impact
+# Stages: PreTestValidation -> TestFailoverExecution -> RecoveryValidation
+#         -> TestCleanup -> ReportResults
+# =============================================================================
+
+trigger: none
+
+schedules:
+  - cron: "0 2 1 * *"
+    displayName: Monthly DR Test
+    branches:
+      include: [main]
+    always: true
+
+variables:
+  - group: bcdr-prod-vars
+  - name: RECOVERY_PLAN
+    value: order-processing-recovery
+  - name: TARGET_RTO_MINUTES
+    value: 120
+  - name: TARGET_RPO_MINUTES
+    value: 15
+
+stages:
+
+  # ============================================================
+  # Stage 1: Validate replication health before test
+  # Fail fast if ASR is not in healthy state
+  # ============================================================
+  - stage: PreTestValidation
+    displayName: Pre-Test Replication Health Validation
+    jobs:
+      - job: ValidateReplicationHealth
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: AzureCLI@2
+            displayName: Check ASR replication health
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                unhealthy=$(az site-recovery replicated-item list                   --resource-group $(RECOVERY_RG)                   --vault-name $(RECOVERY_VAULT)                   --query "[?properties.providerSpecificDetails.replicationHealth!='Normal'].name"                   -o tsv)
+                if [ -n "$unhealthy" ]; then
+                  echo "ERROR: VMs not in Normal replication state:"
+                  echo "$unhealthy"
+                  exit 1
+                fi
+                echo "All VMs in Normal replication state -- proceeding with DR test"
+
+  # ============================================================
+  # Stage 2: Execute test failover in isolated network
+  # test-failover-vnet has NO connectivity to production
+  # ============================================================
+  - stage: TestFailoverExecution
+    displayName: Execute Test Failover (Isolated Network)
+    dependsOn: PreTestValidation
+    condition: succeeded()
+    jobs:
+      - job: ExecuteTestFailover
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: AzureCLI@2
+            displayName: Start test failover
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                echo "Initiating test failover: $(RECOVERY_PLAN)"
+                echo "Test network: test-failover-vnet (isolated -- no production connectivity)"
+                az site-recovery replication-recovery-plan test-failover                   --name "$(RECOVERY_PLAN)"                   --resource-group $(RECOVERY_RG)                   --vault-name $(RECOVERY_VAULT)                   --failover-direction PrimaryToRecovery                   --network-type VmNetwork                   --network $(TEST_FAILOVER_VNET_ID)
+                echo "TEST_FAILOVER_START=$(date -u +%s)" >> $(Pipeline.Workspace)/failover_timing.env
+
+          - script: |
+              python3 scripts/wait_for_failover_completion.py                 --plan-name "$(RECOVERY_PLAN)"                 --timeout-minutes 30
+            displayName: Wait for test failover completion
+
+  # ============================================================
+  # Stage 3: Validate recovered workloads + measure RTO/RPO
+  # ============================================================
+  - stage: RecoveryValidation
+    displayName: Validate Recovery and Measure RTO/RPO
+    dependsOn: TestFailoverExecution
+    condition: succeeded()
+    jobs:
+      - job: ValidateAndMeasure
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: |
+              python3 scripts/validate_application_health.py                 --environment test-failover                 --expected-status 200                 --timeout-seconds 300
+            displayName: Validate application health endpoints
+
+          - script: |
+              python3 scripts/calculate_actual_rto.py                 --plan-name "$(RECOVERY_PLAN)"                 --target-rto-minutes $(TARGET_RTO_MINUTES)
+            displayName: Calculate and validate actual RTO
+
+          - script: |
+              python3 scripts/validate_rpo_compliance.py                 --plan-name "$(RECOVERY_PLAN)"                 --target-rpo-minutes $(TARGET_RPO_MINUTES)
+            displayName: Validate RPO compliance
+
+  # ============================================================
+  # Stage 4: Cleanup -- always() runs even if validation fails
+  # ============================================================
+  - stage: TestCleanup
+    displayName: Cleanup Test Failover Environment
+    dependsOn: RecoveryValidation
+    condition: always()
+    jobs:
+      - job: CleanupTestFailover
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: AzureCLI@2
+            displayName: Cleanup test failover
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az site-recovery replication-recovery-plan cleanup-test-failover                   --name "$(RECOVERY_PLAN)"                   --resource-group $(RECOVERY_RG)                   --vault-name $(RECOVERY_VAULT)
+                echo "Test failover environment cleaned up"
+
+  # ============================================================
+  # Stage 5: Generate and distribute DR test report
+  # ============================================================
+  - stage: ReportResults
+    displayName: Generate DR Test Report
+    dependsOn: TestCleanup
+    condition: always()
+    jobs:
+      - job: PublishReport
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: |
+              python3 scripts/generate_dr_test_report.py                 --plan-name "$(RECOVERY_PLAN)"                 --target-rto-minutes $(TARGET_RTO_MINUTES)                 --target-rpo-minutes $(TARGET_RPO_MINUTES)                 --output-path dr-test-report.json
+            displayName: Generate DR test report
+
+          - publish: dr-test-report.json
+            artifact: dr-test-report
+            displayName: Publish DR test report artifact

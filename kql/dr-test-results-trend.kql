@@ -1,0 +1,34 @@
+// DR Test Results Trend -- RTO/RPO compliance over time
+// Data source: Log Analytics (custom DR test log table)
+// Tracks: actual RTO/RPO per test vs targets, pass/fail trend
+
+// Note: requires DR test pipeline to ingest results to Log Analytics
+// Log table: DRTestResults_CL
+
+DRTestResults_CL
+| where TimeGenerated > ago(365d)
+| extend
+    TestDate         = format_datetime(TimeGenerated, "yyyy-MM-dd"),
+    RTOPassed        = tobool(column_ifexists("rto_passed_b", false)),
+    RPOPassed        = tobool(column_ifexists("rpo_passed_b", false)),
+    ActualRTOMinutes = todouble(column_ifexists("actual_rto_minutes_d", 0)),
+    ActualRPOMinutes = todouble(column_ifexists("actual_rpo_minutes_d", 0)),
+    TargetRTOMinutes = todouble(column_ifexists("target_rto_minutes_d", 120)),
+    TargetRPOMinutes = todouble(column_ifexists("target_rpo_minutes_d", 15))
+| project
+    TestDate,
+    ActualRTOMinutes,
+    TargetRTOMinutes,
+    RTOPassed,
+    ActualRPOMinutes,
+    TargetRPOMinutes,
+    RPOPassed,
+    OverallPassed = RTOPassed and RPOPassed
+| order by TestDate desc
+
+// DR Readiness Score query (for Power BI dashboard)
+// DRTestResults_CL
+// | summarize
+//     RTOPassRate = round(100.0 * countif(rto_passed_b) / count(), 1),
+//     RPOPassRate = round(100.0 * countif(rpo_passed_b) / count(), 1)
+//     by bin(TimeGenerated, 30d)

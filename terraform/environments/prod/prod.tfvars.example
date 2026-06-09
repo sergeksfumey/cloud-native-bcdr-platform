@@ -1,0 +1,2 @@
+ops_email       = "bcdr-team@example.com"
+admin_ip_ranges = ["10.100.0.0/24"]

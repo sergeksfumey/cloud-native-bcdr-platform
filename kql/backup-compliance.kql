@@ -1,0 +1,28 @@
+// Backup Compliance -- job success rate and coverage gaps
+// Data source: AzureDiagnostics (Backup vault logs)
+
+// Backup job success rate -- last 30 days
+AzureDiagnostics
+| where TimeGenerated > ago(30d)
+| where ResourceType == "VAULTS"
+| where Category == "AzureBackupReport"
+| where OperationName == "Backup"
+| extend
+    VMName    = tostring(column_ifexists("BackupItemFriendlyName_s", "")),
+    JobStatus = tostring(column_ifexists("JobStatus_s", ""))
+| summarize
+    TotalJobs   = count(),
+    Succeeded   = countif(JobStatus == "Completed"),
+    Failed      = countif(JobStatus == "Failed"),
+    SuccessRate = round(100.0 * countif(JobStatus == "Completed") / count(), 1)
+    by VMName
+| order by SuccessRate asc
+
+// VMs with recent backup failures (last 24h)
+// AzureDiagnostics
+// | where TimeGenerated > ago(24h)
+// | where Category == "AzureBackupReport"
+// | where OperationName == "Backup"
+// | where JobStatus_s == "Failed"
+// | project TimeGenerated, VMName = BackupItemFriendlyName_s, ErrorDetail = ErrorDetail_s
+// | order by TimeGenerated desc

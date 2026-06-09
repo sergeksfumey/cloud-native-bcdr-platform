@@ -1,0 +1,19 @@
+// ASR Replication Health -- all protected VMs
+// Data source: AzureDiagnostics (ASR vault diagnostic logs)
+// Alert when any VM deviates from Normal replication health
+
+AzureDiagnostics
+| where TimeGenerated > ago(1h)
+| where ResourceType == "VAULTS"
+| where Category == "AzureSiteRecoveryReplicatedItems"
+| extend
+    VMName           = tostring(column_ifexists("replicatedItemFriendlyName_s", "")),
+    ReplicationHealth = tostring(column_ifexists("replicationHealth_s", "")),
+    RPOSeconds       = toint(column_ifexists("rpoInSeconds_d", 0)),
+    LastHeartbeat    = tostring(column_ifexists("lastHeartbeat_t", ""))
+| where ReplicationHealth != "Normal"
+| project TimeGenerated, VMName, ReplicationHealth, RPOSeconds, LastHeartbeat
+| order by TimeGenerated desc
+
+// Alert trigger: any row returned = VM not in Normal replication state
+// Target: zero non-Normal VMs at all times
